@@ -514,4 +514,9 @@ def process_block_report(message):
     chat_id = message.chat.id
     block = message.text.strip()
     report = report_service.block_report(block)
-    bot.send_message(chat_id, f"🏘️ {block}\nቢሎች: {
+    bot.send_message(chat_id, f"🏘️ {block}\nቢሎች: {report['bills']}\nጠቅላላ: {report['amount']:.2f} ብር")
+
+
+def main():
+    print("🤖 Telegram Bot Started")
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)

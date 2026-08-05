@@ -94,16 +94,14 @@ class Config:
     # TELEGRAM BOT
     # =============================
 
-    TELEGRAM_TOKEN = (
-
-        " "
-
-    )
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 
 
-    ADMIN_IDS = [357864692
-
-        ]
+    ADMIN_IDS = [
+        int(x.strip())
+        for x in os.getenv("ADMIN_IDS", "357864692").split(",")
+        if x.strip().isdigit()
+    ]
 
 
 
