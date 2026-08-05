@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Database (አያስቀምጡ!)
+*.db
+*.sqlite
+*.sqlite3
+database/water_billing.db
+backup/
+*.backup
+
+# ሚስጥራዊ ቅንብሮች (ቶከን የሌለው ሊሆን ይችላል)
+config.py
+.env
+*.env
+
+# ሎጎች
+logs/
+*.log
+
+# Pydroid / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# አገልጋይ ፋይሎች
+*.pid
+*.lock
