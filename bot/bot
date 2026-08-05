@@ -1,0 +1,517 @@
+# bot/bot.py
+# Water Billing System - Telegram Bot (Full Version - No PDF)
+
+import telebot
+from telebot import types
+import os
+from datetime import datetime
+from config import Config
+from services.customer_service import CustomerService
+from services.billing_service import BillingService
+from services.payment_service import PaymentService
+from services.meter_service import MeterService
+from services.report_service import ReportService
+from database.database import Database
+from security.permission import Permission
+
+TOKEN = Config.TELEGRAM_TOKEN
+if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
+    print("⚠️ Telegram Token Missing. Bot disabled.")
+    exit(0)
+
+bot = telebot.TeleBot(TOKEN)
+customer_service = CustomerService()
+billing_service = BillingService()
+payment_service = PaymentService()
+meter_service = MeterService()
+report_service = ReportService()
+db = Database()
+
+user_data = {}
+ADMIN_IDS = getattr(Config, 'ADMIN_IDS', [])
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+def get_user_role(user_id):
+    if is_admin(user_id):
+        return "admin"
+    return "viewer"
+
+def has_permission(user_id, action):
+    role = get_user_role(user_id)
+    return Permission.check(role, action)
+
+# =========================
+# KEYBOARD MENU
+# =========================
+def get_main_menu(user_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        "🆕 አዲስ ደንበኛ መመዝገብ",
+        "✏️ ደንበኛ ማሻሻል",
+        "🔍 ደንበኛ ፍለጋ",
+        "📋 የደንበኛ ታሪክ",
+        "📊 የውሃ ንባብ ማስገባት",
+        "📄 የክፍያ መረጃ",
+        "💰 ክፍያ መመዝገብ",
+        "📊 Dashboard",
+        "📈 ሪፖርቶች",
+        "💾 Backup",
+        "👤 ተጠቃሚዎች",
+        "🔄 Backup ታሪክ",
+        "📥 Backup መመለስ"
+    ]
+    for i in range(0, len(buttons), 2):
+        if i+1 < len(buttons):
+            markup.add(types.KeyboardButton(buttons[i]), types.KeyboardButton(buttons[i+1]))
+        else:
+            markup.add(types.KeyboardButton(buttons[i]))
+    return markup
+
+# =========================
+# START
+# =========================
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    text = """🚰 የውሃ ቢሊንግ ሲስተም - ወርጠጅ ከተማ
+
+እባክዎ ከታች ካለው ሜኑ ይምረጡ።"""
+    bot.send_message(message.chat.id, text, reply_markup=get_main_menu(message.from_user.id))
+
+# =========================
+# ADMIN CHECK DECORATOR
+# =========================
+def admin_only(func):
+    def wrapper(message):
+        if not is_admin(message.from_user.id):
+            bot.send_message(message.chat.id, "⛔ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
+            return
+        return func(message)
+    return wrapper
+
+# =========================
+# TEXT ROUTER
+# =========================
+@bot.message_handler(func=lambda message: True)
+def handle_menu_clicks(message):
+    text = message.text
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    if text == "🆕 አዲስ ደንበኛ መመዝገብ":
+        user_data[chat_id] = {}
+        msg = bot.send_message(chat_id, "📝 አዲስ ደንበኛ ምዝገባ\n\nእባክዎ ሙሉ ስም ያስገቡ:")
+        bot.register_next_step_handler(msg, process_add_customer_name)
+
+    elif text == "✏️ ደንበኛ ማሻሻል":
+        msg = bot.send_message(chat_id, "✏️ ማሻሻል ለሚፈልጉት ደንበኛ ኮድ ያስገቡ:")
+        bot.register_next_step_handler(msg, process_update_customer_code)
+
+    elif text == "🔍 ደንበኛ ፍለጋ":
+        msg = bot.send_message(chat_id, "🔍 የሚፈልጉትን ስም፣ ስልክ ወይም ሜተር ቁጥር ያስገቡ:")
+        bot.register_next_step_handler(msg, process_search_customer)
+
+    elif text == "📋 የደንበኛ ታሪክ":
+        msg = bot.send_message(chat_id, "📋 ታሪክ ለማየት የደንበኛ ኮድ ያስገቡ:")
+        bot.register_next_step_handler(msg, process_customer_history)
+
+    elif text == "📊 የውሃ ንባብ ማስገባት":
+        user_data[chat_id] = {}
+        msg = bot.send_message(chat_id, "📊 ንባብ ለማስገባት የደንበኛ ኮድ ያስገቡ:")
+        bot.register_next_step_handler(msg, process_meter_customer)
+
+    elif text == "📄 የክፍያ መረጃ":
+        msg = bot.send_message(chat_id, "📄 የክፍያ መረጃ ለማየት የደንበኛ ኮድ ወይም ID ያስገቡ:")
+        bot.register_next_step_handler(msg, process_bill_info)
+
+    elif text == "💰 ክፍያ መመዝገብ":
+        user_data[chat_id] = {}
+        msg = bot.send_message(chat_id, "💰 ክፍያ ለመመዝገብ የደንበኛ ኮድ ያስገቡ:")
+        bot.register_next_step_handler(msg, process_payment_customer)
+
+    elif text == "📊 Dashboard":
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ ይህ ለአስተዳዳሪ ብቻ ነው.")
+            return
+        stats = db.summary()
+        text = f"📊 Dashboard\n\n👥 ደንበኞች: {stats.get('customers',0)}\n📄 ቢሎች: {stats.get('bills',0)}\n💰 ክፍያዎች: {stats.get('payments',0)}\n👤 ተጠቃሚዎች: {stats.get('users',0)}"
+        bot.send_message(chat_id, text, reply_markup=get_main_menu(user_id))
+
+    elif text == "📈 ሪፖርቶች":
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ ይህ ለአስተዳዳሪ ብቻ ነው.")
+            return
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("📅 የዛሬ ሪፖርት", "📆 የወር ሪፖርት")
+        markup.add("🏘️ በብሎክ", "🏷️ በአይነት")
+        markup.add("💸 የእዳ ሪፖርት", "🔙 ወደ ዋና ሜኑ")
+        bot.send_message(chat_id, "ሪፖርት ዓይነት ይምረጡ:", reply_markup=markup)
+        user_data[chat_id] = {"report_menu": True}
+
+    elif text == "💾 Backup":
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ ለአስተዳዳሪ ብቻ.")
+            return
+        res = db.create_backup()
+        if res.get("success"):
+            bot.send_message(chat_id, f"✅ Backup ተፈጥሯል\n📁 {res['file']}")
+        else:
+            bot.send_message(chat_id, "❌ Backup አልተሳካም")
+
+    elif text == "🔄 Backup ታሪክ":
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ ለአስተዳዳሪ ብቻ.")
+            return
+        history = db.get_backup_history(10)
+        if not history:
+            bot.send_message(chat_id, "ምንም backup አልተገኘም")
+        else:
+            msg = "📋 Backup ታሪክ (የቅርብ 10):\n\n"
+            for h in history:
+                msg += f"📁 {h['filename']}\n📅 {h['created_at']}\n📊 {h['size']} bytes\n\n"
+            bot.send_message(chat_id, msg)
+
+    elif text == "📥 Backup መመለስ":
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ ለአስተዳዳሪ ብቻ.")
+            return
+        msg = bot.send_message(chat_id, "📥 ሙሉ የbackup ፋይል መንገድ ያስገቡ:")
+        bot.register_next_step_handler(msg, process_restore_backup)
+
+    elif text == "👤 ተጠቃሚዎች":
+        if not is_admin(user_id):
+            bot.send_message(chat_id, "⛔ ለአስተዳዳሪ ብቻ.")
+            return
+        conn = db.connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, full_name, role, status FROM users")
+        users = cursor.fetchall()
+        conn.close()
+        if not users:
+            bot.send_message(chat_id, "ምንም ተጠቃሚ የለም")
+            return
+        for u in users:
+            bot.send_message(chat_id, f"👤 {u['username']}\n📛 {u['full_name']}\n🛡 {u['role']}\n🟢 {u['status']}\n------------------")
+
+    elif text in ["📅 የዛሬ ሪፖርት", "📆 የወር ሪፖርት", "🏘️ በብሎክ", "🏷️ በአይነት", "💸 የእዳ ሪፖርት"]:
+        if not is_admin(user_id):
+            return
+        if text == "📅 የዛሬ ሪፖርት":
+            report = report_service.daily_report()
+            bot.send_message(chat_id, f"📅 የዛሬ {report['date']}\nቢሎች: {report['bills']}\nገቢ: {report['amount']:.2f} ብር")
+        elif text == "📆 የወር ሪፖርት":
+            msg = bot.send_message(chat_id, "እባክዎ ዓመት እና ወር በቅደም ተከተል (YYYY MM) ያስገቡ:")
+            bot.register_next_step_handler(msg, process_monthly_report)
+        elif text == "🏘️ በብሎክ":
+            msg = bot.send_message(chat_id, "እባክዎ የብሎክ ስም (ለምሳሌ Block-1) ያስገቡ:")
+            bot.register_next_step_handler(msg, process_block_report)
+        elif text == "🏷️ በአይነት":
+            msg = bot.send_message(chat_id, "እባክዎ የደንበኛ አይነት (PR, COM, PUB) ያስገቡ:")
+            bot.register_next_step_handler(msg, process_category_report)
+        elif text == "💸 የእዳ ሪፖርት":
+            debtors = report_service.debt_report()
+            if not debtors:
+                bot.send_message(chat_id, "ምንም እዳ የለም")
+            else:
+                msg = "💸 የእዳ ዝርዝር:\n\n"
+                for d in debtors:
+                    msg += f"{d['name']} - {d['customer_code']} - {d['phone']} - {d['debt']:.2f} ብር\n"
+                bot.send_message(chat_id, msg)
+
+    elif text == "🔙 ወደ ዋና ሜኑ":
+        bot.send_message(chat_id, "ወደ ዋና ሜኑ ተመለስን", reply_markup=get_main_menu(user_id))
+
+    else:
+        bot.send_message(chat_id, "እባክዎ ከሜኑ ይምረጡ", reply_markup=get_main_menu(user_id))
+
+# =========================
+# STEP HANDLERS
+# =========================
+
+# --- ADD CUSTOMER ---
+def process_add_customer_name(message):
+    chat_id = message.chat.id
+    user_data[chat_id]['name'] = message.text.strip()
+    msg = bot.send_message(chat_id, "📱 ስልክ ቁጥር ያስገቡ:")
+    bot.register_next_step_handler(msg, process_add_customer_phone)
+
+def process_add_customer_phone(message):
+    chat_id = message.chat.id
+    user_data[chat_id]['phone'] = message.text.strip()
+    msg = bot.send_message(chat_id, "🔢 ሜተር ቁጥር ያስገቡ:")
+    bot.register_next_step_handler(msg, process_add_customer_meter)
+
+def process_add_customer_meter(message):
+    chat_id = message.chat.id
+    user_data[chat_id]['meter_number'] = message.text.strip()
+    msg = bot.send_message(chat_id, "🏷️ የደንበኛ አይነት (PR, COM, PUB) ያስገቡ (ነባሪ PR):")
+    bot.register_next_step_handler(msg, process_add_customer_category)
+
+def process_add_customer_category(message):
+    chat_id = message.chat.id
+    category = message.text.strip().upper()
+    if category not in ["PR", "COM", "PUB"]:
+        category = "PR"
+    user_data[chat_id]['category'] = category
+    msg = bot.send_message(chat_id, "📍 አድራሻ (አማራጭ) ያስገቡ ወይም 'ቀጥል' ይበሉ:")
+    bot.register_next_step_handler(msg, process_add_customer_address)
+
+def process_add_customer_address(message):
+    chat_id = message.chat.id
+    address = message.text.strip()
+    if address.lower() == "ቀጥል":
+        address = ""
+    user_data[chat_id]['address'] = address
+    data = {
+        "name": user_data[chat_id]['name'],
+        "phone": user_data[chat_id]['phone'],
+        "meter_number": user_data[chat_id]['meter_number'],
+        "category": user_data[chat_id]['category'],
+        "address": user_data[chat_id]['address'],
+        "status": "active"
+    }
+    result = customer_service.create_customer(data)
+    if result.get("success"):
+        bot.send_message(chat_id, f"✅ ደንበኛ ተመዝግቧል!\n👤 {data['name']}\n🔑 {result['customer_code']}")
+    else:
+        bot.send_message(chat_id, f"❌ ስህተት: {result.get('error')}")
+    user_data.pop(chat_id, None)
+
+# --- UPDATE CUSTOMER ---
+def process_update_customer_code(message):
+    chat_id = message.chat.id
+    code = message.text.strip().upper()
+    customer = customer_service.get_by_code(code)
+    if not customer:
+        bot.send_message(chat_id, "❌ ደንበኛ አልተገኘም")
+        return
+    user_data[chat_id] = {"customer_id": customer['id'], "customer_code": code}
+    msg = bot.send_message(chat_id, f"✏️ አሁን ያለው ስም: {customer['name']}\nአዲስ ስም ያስገቡ (ለመተው 'ቀጥል'):")
+    bot.register_next_step_handler(msg, process_update_customer_name)
+
+def process_update_customer_name(message):
+    chat_id = message.chat.id
+    val = message.text.strip()
+    if val.lower() != "ቀጥል":
+        user_data[chat_id]['name'] = val
+    msg = bot.send_message(chat_id, "📱 አዲስ ስልክ ያስገቡ (ቀጥል):")
+    bot.register_next_step_handler(msg, process_update_customer_phone)
+
+def process_update_customer_phone(message):
+    chat_id = message.chat.id
+    val = message.text.strip()
+    if val.lower() != "ቀጥል":
+        user_data[chat_id]['phone'] = val
+    msg = bot.send_message(chat_id, "🔢 አዲስ ሜተር ቁጥር ያስገቡ (ቀጥል):")
+    bot.register_next_step_handler(msg, process_update_customer_meter)
+
+def process_update_customer_meter(message):
+    chat_id = message.chat.id
+    val = message.text.strip()
+    if val.lower() != "ቀጥል":
+        user_data[chat_id]['meter_number'] = val
+    data = {}
+    for key in ['name', 'phone', 'meter_number']:
+        if key in user_data[chat_id]:
+            data[key] = user_data[chat_id][key]
+    if data:
+        result = customer_service.update_customer(user_data[chat_id]['customer_id'], data)
+        if result.get("success"):
+            bot.send_message(chat_id, "✅ ደንበኛ ተሻሽሏል")
+        else:
+            bot.send_message(chat_id, f"❌ ስህተት: {result.get('error')}")
+    else:
+        bot.send_message(chat_id, "ምንም ለውጥ አልተደረገም")
+    user_data.pop(chat_id, None)
+
+# --- SEARCH CUSTOMER ---
+def process_search_customer(message):
+    keyword = message.text.strip()
+    results = customer_service.search(keyword)
+    if not results:
+        bot.send_message(message.chat.id, "❌ ምንም አልተገኘም")
+        return
+    for c in results:
+        bot.send_message(message.chat.id,
+            f"👤 {c['name']}\n🔑 {c['customer_code']}\n📱 {c['phone']}\n🔢 {c['meter_number']}\n📍 {c['address']}")
+
+# --- CUSTOMER HISTORY ---
+def process_customer_history(message):
+    code = message.text.strip().upper()
+    customer = customer_service.get_by_code(code)
+    if not customer:
+        bot.send_message(message.chat.id, "❌ ደንበኛ አልተገኘም")
+        return
+    history = customer_service.get_history(customer['id'])
+    msg = f"📋 የ{customer['name']} ታሪክ\n\n"
+    msg += f"📊 ንባቦች: {len(history['readings'])}\n"
+    msg += f"📄 ቢሎች: {len(history['bills'])}\n"
+    msg += f"💰 ክፍያዎች: {len(history['payments'])}\n\n"
+    if history['readings']:
+        r = history['readings'][0]
+        msg += f"የቅርብ ንባብ: {r['current_reading']} m³ (የቀዳሚ: {r['previous_reading']}) ፍጆታ: {r['consumption']}\n"
+    if history['bills']:
+        b = history['bills'][0]
+        msg += f"የቅርብ ቢል: {b['invoice_number']} - {b['amount']:.2f} ብር - {b['status']}"
+    bot.send_message(message.chat.id, msg)
+
+# --- METER READING ---
+def process_meter_customer(message):
+    chat_id = message.chat.id
+    code = message.text.strip().upper()
+    customer = customer_service.get_by_code(code)
+    if not customer:
+        bot.send_message(chat_id, "❌ ደንበኛ አልተገኘም")
+        return
+    user_data[chat_id]['customer_id'] = customer['id']
+    user_data[chat_id]['customer_code'] = code
+    last = meter_service.latest_reading(customer['id'])
+    if last:
+        bot.send_message(chat_id, f"📊 የቀዳሚ ንባብ: {last['current_reading']} m³")
+    else:
+        bot.send_message(chat_id, "📊 ይህ የመጀመሪያ ንባብ ነው")
+    msg = bot.send_message(chat_id, "🔢 አዲስ ንባብ በm³ ያስገቡ:")
+    bot.register_next_step_handler(msg, process_meter_reading)
+
+def process_meter_reading(message):
+    chat_id = message.chat.id
+    try:
+        current = float(message.text.strip().replace(',', '.'))
+        if current < 0:
+            raise ValueError
+    except:
+        bot.send_message(chat_id, "❌ ትክክለኛ ቁጥር ያስገቡ")
+        return
+    customer_id = user_data[chat_id]['customer_id']
+    result = meter_service.add_reading(customer_id, current)
+    if result.get("success"):
+        bot.send_message(chat_id, f"✅ ንባብ ተመዝግቧል\n📊 ፍጆታ: {result['consumption']} m³")
+        bill_result = billing_service.generate_bill(customer_id, result['reading_id'])
+        if bill_result.get("success"):
+            bot.send_message(chat_id, f"🧾 ሂሳብ ተዘጋጅቷል\n📄 {bill_result['invoice']}\n💰 {bill_result['amount']:.2f} ብር")
+        else:
+            bot.send_message(chat_id, f"⚠️ ሂሳብ አልተዘጋጀም: {bill_result.get('message')}")
+    else:
+        bot.send_message(chat_id, f"❌ ስህተት: {result.get('message')}")
+    user_data.pop(chat_id, None)
+
+# --- BILL INFO ---
+def process_bill_info(message):
+    chat_id = message.chat.id
+    code = message.text.strip()
+    customer = None
+    if code.isdigit():
+        customer = customer_service.get_customer(int(code))
+    else:
+        customer = customer_service.get_by_code(code.upper())
+    if not customer:
+        bot.send_message(chat_id, "❌ ደንበኛ አልተገኘም")
+        return
+    bills = billing_service.get_customer_bills(customer['id'])
+    if not bills:
+        bot.send_message(chat_id, "ምንም ቢል የለም")
+        return
+    total = sum(b['amount'] for b in bills)
+    unpaid = [b for b in bills if b['status'] != 'paid']
+    unpaid_total = sum(b['amount'] for b in unpaid)
+    msg = f"🧾 ማጠቃለያ:\n"
+    msg += f"📄 ጠቅላላ ቢሎች: {len(bills)}\n"
+    msg += f"💰 ጠቅላላ: {total:.2f} ብር\n"
+    msg += f"⚠️ ያልተከፈለ: {len(unpaid)} ቢሎች\n"
+    msg += f"💸 ያልተከፈለ ጠቅላላ: {unpaid_total:.2f} ብር"
+    bot.send_message(chat_id, msg)
+    for b in bills[:3]:
+        bot.send_message(chat_id,
+            f"📄 {b['invoice_number']}\n💰 {b['amount']:.2f} ብር\n📌 {b['status']}\n📅 {b['created_at']}")
+
+# --- PAYMENT ---
+def process_payment_customer(message):
+    chat_id = message.chat.id
+    code = message.text.strip().upper()
+    customer = customer_service.get_by_code(code)
+    if not customer:
+        bot.send_message(chat_id, "❌ ደንበኛ አልተገኘም")
+        return
+    user_data[chat_id]['customer_id'] = customer['id']
+    user_data[chat_id]['customer_code'] = code
+    debt = payment_service.get_customer_debt(customer['id'])
+    bot.send_message(chat_id, f"💸 ያለበት ዕዳ: {debt:.2f} ብር")
+    msg = bot.send_message(chat_id, "💰 የክፍያ መጠን ያስገቡ:")
+    bot.register_next_step_handler(msg, process_payment_amount)
+
+def process_payment_amount(message):
+    chat_id = message.chat.id
+    try:
+        amount = float(message.text.strip().replace(',', '.'))
+    except:
+        bot.send_message(chat_id, "❌ ትክክለኛ ቁጥር ያስገቡ")
+        return
+    user_data[chat_id]['amount'] = amount
+    msg = bot.send_message(chat_id, "💳 የክፍያ ዘዴ (cash, telebirr, bank):")
+    bot.register_next_step_handler(msg, process_payment_method)
+
+def process_payment_method(message):
+    chat_id = message.chat.id
+    method = message.text.strip().lower()
+    if method not in ['cash', 'telebirr', 'bank']:
+        method = 'cash'
+    user_data[chat_id]['method'] = method
+    msg = bot.send_message(chat_id, "📝 የማጣቀሻ ቁጥር (አማራጭ) ያስገቡ ወይም 'ቀጥል':")
+    bot.register_next_step_handler(msg, process_payment_reference)
+
+def process_payment_reference(message):
+    chat_id = message.chat.id
+    ref = message.text.strip()
+    if ref.lower() == "ቀጥል":
+        ref = None
+    data = {
+        "customer_id": user_data[chat_id]['customer_id'],
+        "amount": user_data[chat_id]['amount'],
+        "payment_method": user_data[chat_id]['method'],
+        "reference_no": ref,
+        "paid_by": "Telegram User"
+    }
+    result = payment_service.make_payment(**data)
+    if result.get("success"):
+        customer = customer_service.get_customer(data['customer_id'])
+        bills = billing_service.get_customer_bills(data['customer_id'])
+        receipt_msg = f"🧾 **የክፍያ ደረሰኝ**\n\n"
+        receipt_msg += f"🏢 {Config.COMPANY_NAME}\n"
+        receipt_msg += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        receipt_msg += f"🧾 ደረሰኝ ቁጥር: {result['receipt']}\n"
+        receipt_msg += f"👤 ደንበኛ: {customer['name']} ({customer['customer_code']})\n"
+        receipt_msg += f"💰 መጠን: {data['amount']:.2f} ብር\n"
+        receipt_msg += f"💳 ዘዴ: {data['payment_method']}\n"
+        if data['reference_no']:
+            receipt_msg += f"📝 ማጣቀሻ: {data['reference_no']}\n"
+        receipt_msg += f"✅ ሁኔታ: ተከፍሏል"
+        if bills:
+            b = bills[0]
+            receipt_msg += f"\n\n📄 ሂሳብ ቁጥር: {b['invoice_number']}"
+        bot.send_message(chat_id, receipt_msg, parse_mode="Markdown")
+        bot.send_message(chat_id, "✅ ክፍያ ተመዝግቧል!")
+    else:
+        bot.send_message(chat_id, f"❌ ስህተት: {result.get('error', 'ያልታወቀ ስህተት')}")
+    user_data.pop(chat_id, None)
+
+# --- REPORTS SUB-HANDLERS ---
+def process_monthly_report(message):
+    chat_id = message.chat.id
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        bot.send_message(chat_id, "❌ ቅርጽ: YYYY MM")
+        return
+    try:
+        year = int(parts[0])
+        month = int(parts[1])
+        report = report_service.monthly_report(year, month)
+        bot.send_message(chat_id, f"📆 {year}-{month:02d}\nቢሎች: {report['bills']}\nገቢ: {report['amount']:.2f} ብር")
+    except:
+        bot.send_message(chat_id, "❌ ትክክለኛ ቅርጽ አይደለም")
+
+def process_block_report(message):
+    chat_id = message.chat.id
+    block = message.text.strip()
+    report = report_service.block_report(block)
+    bot.send_message(chat_id, f"🏘️ {block}\nቢሎች: {
